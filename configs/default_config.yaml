@@ -1,0 +1,87 @@
+# Default Configuration for LLM-RL Code Golf Training
+
+# Model Configuration
+model:
+  name: "codellama/CodeLlama-7b-Python-hf"  # Base model
+  max_length: 2048
+  temperature: 0.8
+  top_p: 0.95
+  quantization: "4bit"  # Options: null, "4bit", "8bit"
+  
+  # LoRA Configuration
+  lora:
+    enabled: true
+    r: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    target_modules: ["q_proj", "v_proj"]
+  
+  # Trainable layers
+  freeze_base: true
+  trainable_layers: ["lm_head"]
+
+# PPO Training Configuration
+ppo:
+  learning_rate: 1.0e-5
+  batch_size: 8
+  num_epochs: 100
+  gamma: 0.99  # Discount factor
+  lambda_: 0.95  # GAE lambda
+  clip_epsilon: 0.2  # PPO clip parameter
+  value_loss_coef: 0.5
+  entropy_coef: 0.01
+  max_grad_norm: 1.0
+  num_trajectories_per_update: 32
+
+# Reward Configuration
+reward:
+  max_reward: 10.0
+  test_pass_weight: 1.0
+  code_length_weight: 0.1
+  syntax_error_penalty: -5.0
+  runtime_error_penalty: -2.0
+  timeout_penalty: -3.0
+  normalize: true
+
+# Sandbox Configuration
+sandbox:
+  timeout: 5.0  # seconds
+  memory_limit: 512  # MB
+  allow_imports: ["collections", "itertools", "math", "operator", "re", "string", "struct"]
+
+# Data Configuration
+data:
+  task_dir: "google-code-golf-2025"
+  num_tasks: 400
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+  seed: 42
+
+# Curriculum Learning
+curriculum:
+  enabled: true
+  initial_difficulty: "easy"
+  progression_threshold: 0.7  # Success rate to advance
+  difficulty_levels: ["easy", "medium", "hard"]
+
+# Checkpointing
+checkpoint:
+  save_dir: "checkpoints"
+  save_interval: 1000  # steps
+  keep_best_n: 3
+  early_stopping_patience: 10  # epochs
+
+# Logging
+logging:
+  log_dir: "logs"
+  tensorboard: true
+  wandb: false
+  wandb_project: "llm-rl-code-golf"
+  log_interval: 10  # steps
+
+# Experiment Configuration
+experiment:
+  name: "baseline"
+  seed: 42
+  device: "cuda"  # Options: "cuda", "cpu", "mps"

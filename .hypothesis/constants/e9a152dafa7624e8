@@ -1,0 +1,4 @@
+# file: /Users/achawdhary/Desktop/Workspaces/codegolf_llm_reinforcement_learning/src/data/difficulty_analyzer.py
+# hypothesis_version: 6.148.6
+
+[0.0, 1.0, 10.0, 100.0, 'avg_grid_size', 'avg_size_ratio', 'avg_unique_values', 'easy', 'hard', 'medium', 'num_train_examples']

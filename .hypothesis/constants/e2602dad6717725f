@@ -1,0 +1,4 @@
+# file: /Users/achawdhary/Desktop/Workspaces/codegolf_llm_reinforcement_learning/src/data/task_formatter.py
+# hypothesis_version: 6.148.6
+
+['\n# Task:', '\n# Test Examples:', '\nOutput:', '# Training Examples:', 'Input:']

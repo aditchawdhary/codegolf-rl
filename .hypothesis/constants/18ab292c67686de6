@@ -1,0 +1,4 @@
+# file: /Users/achawdhary/Desktop/Workspaces/codegolf_llm_reinforcement_learning/src/models/value_network.py
+# hypothesis_version: 6.148.6
+
+[768, 'pt']

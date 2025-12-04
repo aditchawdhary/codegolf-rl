@@ -1,0 +1,4 @@
+# file: /Users/achawdhary/Desktop/Workspaces/codegolf_llm_reinforcement_learning/src/data/task_loader.py
+# hypothesis_version: 6.148.6
+
+[401, 'arc-gen', 'avg_arc_gen_per_task', 'avg_test_per_task', 'avg_train_per_task', 'input', 'num_tasks', 'output', 'r', 'test', 'total_test_examples', 'total_train_examples', 'train']

@@ -1,0 +1,4 @@
+# file: /Users/achawdhary/Desktop/Workspaces/codegolf_llm_reinforcement_learning/src/models/config.py
+# hypothesis_version: 6.148.6
+
+[0.05, 0.8, 0.95, 2048, 'ModelConfig', 'bias', 'cuda', 'device', 'float16', 'lora_alpha', 'lora_config', 'lora_dropout', 'max_length', 'model_name', 'none', 'q_proj', 'quantization', 'r', 'target_modules', 'temperature', 'top_k', 'top_p', 'torch_dtype', 'trainable_layers', 'trust_remote_code', 'use_cache', 'v_proj']

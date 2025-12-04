@@ -1,0 +1,4 @@
+# file: /Users/achawdhary/Desktop/Workspaces/codegolf_llm_reinforcement_learning/src/models/code_llm.py
+# hypothesis_version: 6.148.6
+
+[512, '4bit', '8bit', 'CodeLLM', 'attentions', 'auto', 'bfloat16', 'cpu', 'cuda', 'device_map', 'float16', 'float32', 'hidden_states', 'input_ids', 'left', 'logits', 'mps', 'nf4', 'pt', 'quantization_config', 'r', 'torch_dtype', 'trust_remote_code', 'use_cache', 'w']
