@@ -62,6 +62,10 @@ class CodeLLM:
         if quantization_config:
             model_kwargs["quantization_config"] = quantization_config
             model_kwargs["device_map"] = "auto"
+            # Set max memory per GPU (leave 2GB headroom)
+            num_gpus = torch.cuda.device_count()
+            if num_gpus > 1:
+                model_kwargs["max_memory"] = {i: "38GB" for i in range(num_gpus)}
         else:
             model_kwargs["torch_dtype"] = self._get_torch_dtype()
         

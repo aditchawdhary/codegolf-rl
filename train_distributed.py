@@ -20,108 +20,125 @@ from src.experiments import CheckpointManager, MetricsTracker, EarlyStopping
 from src.evaluation import InferencePipeline, PerformanceEvaluator
 
 
-@ray.remote(num_gpus=1)
-class TrajectoryCollector:
-    """Ray actor for collecting trajectories on a single GPU."""
+@ray.remote(num_gpus=8)
+class SharedModelServer:
+    """Shared model server that shards the model across all GPUs."""
     
-    def __init__(self, model_config: ModelConfig, ppo_config: PPOConfig, gpu_id: int):
-        """Initialize trajectory collector on specific GPU."""
-        self.gpu_id = gpu_id
-        self.device = f"cuda:{gpu_id}"
+    def __init__(self, model_config: ModelConfig):
+        """Initialize shared model with automatic sharding across GPUs."""
+        print("Loading model with automatic sharding across 8 GPUs...")
         
-        # Update model config for this GPU
-        model_config.device = self.device
-        
-        # Initialize models
+        # Initialize models with device_map="auto" for sharding
         self.policy = PolicyNetwork(model_config)
         self.value = ValueNetwork(self.policy, hidden_size=768)
         
-        # Initialize components
+        print(f"✓ Model loaded and sharded across GPUs")
+        print(f"  Total parameters: {self.policy.get_total_parameters():,}")
+    
+    def sample_action(self, state: str, max_new_tokens: int = 512):
+        """Sample action from policy."""
+        return self.policy.sample_action(state, max_new_tokens=max_new_tokens)
+    
+    def estimate_value(self, state: str):
+        """Estimate value of state."""
+        return self.value.estimate_value(state)
+    
+    def compute_log_prob(self, state: str, action: str, requires_grad: bool = True):
+        """Compute log probability."""
+        return self.policy.compute_log_prob(state, action, requires_grad=requires_grad)
+    
+    def set_train_mode(self):
+        """Set models to training mode."""
+        self.policy.model.train()
+        self.value.value_head.train()
+    
+    def set_eval_mode(self):
+        """Set models to eval mode."""
+        self.policy.model.eval()
+        self.value.value_head.eval()
+    
+    def get_policy(self):
+        """Get policy network reference."""
+        return self.policy
+    
+    def get_value(self):
+        """Get value network reference."""
+        return self.value
+
+
+@ray.remote
+class TrajectoryCollector:
+    """Ray actor for collecting trajectories (CPU only, no GPU)."""
+    
+    def __init__(self):
+        """Initialize trajectory collector."""
         self.reward_calculator = RewardCalculator()
         self.sandbox = CodeSandbox(timeout=5.0)
-        self.ppo_config = ppo_config
         
         from src.data import TaskFormatter
         self.formatter = TaskFormatter()
         
-        print(f"✓ Trajectory collector initialized on GPU {gpu_id}")
+        print(f"✓ Trajectory collector initialized")
     
-    def collect_trajectories(self, tasks: List[Task]) -> List[Trajectory]:
-        """Collect trajectories for given tasks."""
-        trajectories = []
+    def collect_trajectory(self, task: Task, model_server) -> Trajectory:
+        """Collect a single trajectory using shared model server."""
+        trajectory = Trajectory()
         
-        for task in tasks:
-            trajectory = Trajectory()
-            
-            # Format task as prompt
-            state = self.formatter.format_prompt(task, include_test=False)
-            
-            # Sample action from policy
-            action, log_prob = self.policy.sample_action(
-                state,
-                max_new_tokens=512
-            )
-            
-            # Estimate value
-            value = self.value.estimate_value(state)
-            
-            # Execute code and get reward
-            results = self.sandbox.execute(action, task)
-            reward = self.reward_calculator.compute_reward(
-                action,
-                results,
-                task_difficulty=task.difficulty_score / 100.0
-            )
-            
-            # Add to trajectory
-            trajectory.add_step(state, action, reward, log_prob, value)
-            trajectories.append(trajectory)
+        # Format task as prompt
+        state = self.formatter.format_prompt(task, include_test=False)
         
-        return trajectories
-    
-    def update_weights(self, policy_state_dict, value_state_dict):
-        """Update model weights from central coordinator."""
-        self.policy.model.load_state_dict(policy_state_dict)
-        self.value.value_head.load_state_dict(value_state_dict)
-    
-    def get_weights(self):
-        """Get current model weights."""
-        return {
-            "policy": self.policy.model.state_dict(),
-            "value": self.value.value_head.state_dict()
-        }
+        # Sample action from shared policy
+        action, log_prob = ray.get(model_server.sample_action.remote(state, max_new_tokens=512))
+        
+        # Estimate value from shared value network
+        value = ray.get(model_server.estimate_value.remote(state))
+        
+        # Execute code and get reward
+        results = self.sandbox.execute(action, task)
+        reward = self.reward_calculator.compute_reward(
+            action,
+            results,
+            task_difficulty=task.difficulty_score / 100.0
+        )
+        
+        # Add to trajectory
+        trajectory.add_step(state, action, reward, log_prob, value)
+        
+        return trajectory
 
 
 class DistributedPPOTrainer:
-    """Distributed PPO trainer using Ray."""
+    """Distributed PPO trainer using Ray with model sharding."""
     
     def __init__(
         self,
         model_config: ModelConfig,
         ppo_config: PPOConfig,
-        num_gpus: int = 8
+        num_workers: int = 16
     ):
         """Initialize distributed trainer."""
         self.model_config = model_config
         self.ppo_config = ppo_config
-        self.num_gpus = num_gpus
+        self.num_workers = num_workers
         
         # Initialize Ray
         if not ray.is_initialized():
-            ray.init(num_gpus=num_gpus)
+            ray.init(num_gpus=8)
         
-        print(f"Initializing {num_gpus} trajectory collectors...")
+        print(f"Initializing shared model server (sharded across 8 GPUs)...")
         
-        # Create trajectory collectors (one per GPU)
+        # Create shared model server (sharded across all 8 GPUs)
+        self.model_server = SharedModelServer.remote(model_config)
+        
+        print(f"Initializing {num_workers} trajectory collectors...")
+        
+        # Create trajectory collectors (CPU only, no GPU)
         self.collectors = [
-            TrajectoryCollector.remote(model_config, ppo_config, gpu_id)
-            for gpu_id in range(num_gpus)
+            TrajectoryCollector.remote()
+            for _ in range(num_workers)
         ]
         
-        # Initialize central policy and value networks (on GPU 0)
-        model_config.device = "cuda:0"
-        self.policy = PolicyNetwork(model_config)
-        self.value = ValueNetwork(self.policy, hidden_size=768)
+        print(f"✓ {num_workers} workers ready")
         
         # Optimizers
         self.policy_optimizer = torch.optim.Adam(
@@ -144,44 +161,22 @@ class DistributedPPOTrainer:
         print("✓ Distributed PPO trainer initialized")
     
     def collect_trajectories_parallel(self, tasks: List[Task]) -> List[Trajectory]:
-        """Collect trajectories in parallel across all GPUs."""
-        # Split tasks across GPUs
-        tasks_per_gpu = len(tasks) // self.num_gpus
-        task_chunks = [
-            tasks[i * tasks_per_gpu:(i + 1) * tasks_per_gpu]
-            for i in range(self.num_gpus)
-        ]
+        """Collect trajectories in parallel using shared model."""
+        # Set model to eval mode for trajectory collection
+        ray.get(self.model_server.set_eval_mode.remote())
         
-        # Handle remainder
-        remainder = len(tasks) % self.num_gpus
-        if remainder > 0:
-            task_chunks[-1].extend(tasks[-remainder:])
+        # Distribute tasks across workers
+        trajectory_futures = []
         
-        # Broadcast current weights to all collectors
-        policy_weights = self.policy.model.state_dict()
-        value_weights = self.value.value_head.state_dict()
+        for i, task in enumerate(tasks):
+            worker = self.collectors[i % self.num_workers]
+            future = worker.collect_trajectory.remote(task, self.model_server)
+            trajectory_futures.append(future)
         
-        update_futures = [
-            collector.update_weights.remote(policy_weights, value_weights)
-            for collector in self.collectors
-        ]
-        ray.get(update_futures)
+        # Wait for all trajectories
+        trajectories = ray.get(trajectory_futures)
         
-        # Collect trajectories in parallel
-        trajectory_futures = [
-            collector.collect_trajectories.remote(chunk)
-            for collector, chunk in zip(self.collectors, task_chunks)
-        ]
-        
-        # Gather results
-        trajectory_lists = ray.get(trajectory_futures)
-        
-        # Flatten list of lists
-        all_trajectories = []
-        for traj_list in trajectory_lists:
-            all_trajectories.extend(traj_list)
-        
-        return all_trajectories
+        return trajectories
     
     def train_step(self, tasks: List[Task]):
         """Perform one distributed training step."""
@@ -383,9 +378,9 @@ def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Distributed training with Ray")
     
-    parser.add_argument("--model-name", type=str, default="codellama/CodeLlama-7b-Python-hf")
-    parser.add_argument("--num-gpus", type=int, default=8, help="Number of GPUs to use")
-    parser.add_argument("--quantization", type=str, default=None, choices=["4bit", "8bit", None])
+    parser.add_argument("--model-name", type=str, default="codellama/CodeLlama-34b-Python-hf")
+    parser.add_argument("--num-workers", type=int, default=16, help="Number of trajectory collection workers")
+    parser.add_argument("--quantization", type=str, default="8bit", choices=["4bit", "8bit", None])
     parser.add_argument("--num-steps", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=64, help="Total batch size across all GPUs")
     parser.add_argument("--learning-rate", type=float, default=1e-5)
@@ -406,7 +401,8 @@ def main():
     
     print("="*60)
     print("Distributed LLM-RL Code Golf Training")
-    print(f"Using {args.num_gpus} GPUs")
+    print(f"Model sharded across 8 GPUs")
+    print(f"{args.num_workers} parallel trajectory collectors")
     print("="*60)
     
     # Load tasks
@@ -446,8 +442,8 @@ def main():
     )
     
     # Initialize distributed trainer
-    print(f"\nInitializing distributed trainer with {args.num_gpus} GPUs...")
-    trainer = DistributedPPOTrainer(model_config, ppo_config, num_gpus=args.num_gpus)
+    print(f"\nInitializing distributed trainer...")
+    trainer = DistributedPPOTrainer(model_config, ppo_config, num_workers=args.num_workers)
     
     # Initialize checkpointing and logging
     ckpt_manager = CheckpointManager(checkpoint_dir=args.checkpoint_dir, keep_last_n=5)
