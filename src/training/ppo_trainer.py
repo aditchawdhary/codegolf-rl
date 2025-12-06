@@ -195,9 +195,13 @@ class PPOTrainer:
         advantages = advantages.to(device=device, dtype=dtype)
         returns = returns.to(device=device, dtype=dtype)
         
+        # Ensure models are in training mode
+        self.policy.model.train()
+        self.value.value_head.train()
+        
         # PPO epochs
         for epoch in range(self.config.num_epochs):
-            # Compute new log probs and values
+            # Compute new log probs and values with gradient tracking
             new_log_probs = []
             new_values = []
             
@@ -209,6 +213,10 @@ class PPOTrainer:
             
             new_log_probs = torch.stack(new_log_probs)
             new_values = torch.stack(new_values)
+            
+            # Verify gradients are enabled
+            if not new_log_probs.requires_grad:
+                raise RuntimeError("Log probs don't require grad - check model training mode")
             
             # Compute policy loss (PPO clipped objective)
             ratio = torch.exp(new_log_probs - old_log_probs)

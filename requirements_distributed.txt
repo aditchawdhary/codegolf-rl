@@ -1,0 +1,2 @@
+# Additional requirements for distributed training
+ray[default]>=2.9.0

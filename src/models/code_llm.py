@@ -189,13 +189,14 @@ class CodeLLM:
         
         return generated_text
     
-    def get_logprobs(self, prompt: str, completion: str) -> torch.Tensor:
+    def get_logprobs(self, prompt: str, completion: str, requires_grad: bool = False) -> torch.Tensor:
         """
         Get log probabilities for a completion given a prompt.
         
         Args:
             prompt: Input prompt
             completion: Completion text
+            requires_grad: Whether to track gradients (needed for training)
             
         Returns:
             Log probabilities tensor
@@ -208,10 +209,14 @@ class CodeLLM:
         # Move to device
         inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
         
-        # Get model outputs
-        with torch.no_grad():
+        # Get model outputs (with or without gradients)
+        if requires_grad:
             outputs = self.model(**inputs)
             logits = outputs.logits
+        else:
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                logits = outputs.logits
         
         # Get log probabilities for completion tokens
         prompt_length = prompt_inputs["input_ids"].shape[1]

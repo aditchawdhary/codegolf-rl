@@ -56,19 +56,20 @@ class PolicyNetwork(CodeLLM):
         
         return code, log_prob
     
-    def compute_log_prob(self, state: str, action: str) -> torch.Tensor:
+    def compute_log_prob(self, state: str, action: str, requires_grad: bool = True) -> torch.Tensor:
         """
         Compute log probability of an action given a state.
         
         Args:
             state: Input state (prompt)
             action: Action (generated code)
+            requires_grad: Whether to track gradients (True for training, False for inference)
             
         Returns:
             Log probability tensor
         """
         # Get log probabilities for each token
-        token_log_probs = self.get_logprobs(state, action)
+        token_log_probs = self.get_logprobs(state, action, requires_grad=requires_grad)
         
         # Sum log probabilities (log of product = sum of logs)
         total_log_prob = token_log_probs.sum()
