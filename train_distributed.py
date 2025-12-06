@@ -22,6 +22,7 @@ import torch.nn.functional as F
 from typing import List, Tuple, Dict
 from dataclasses import dataclass
 
+from vllm import LLM, SamplingParams
 from src.models import ModelConfig, PolicyNetwork, ValueNetwork
 from src.data import TaskLoader, DifficultyAnalyzer, Task, TaskFormatter
 from src.training import (
@@ -53,38 +54,36 @@ class SharedModelServer:
     """
     
     def __init__(self, model_config: ModelConfig):
-        """Initialize model with automatic sharding across all 8 GPUs."""
+        """Initialize model with vLLM for fast inference."""
         print("\n" + "="*70)
-        print("INITIALIZING SHARED MODEL SERVER")
+        print("INITIALIZING SHARED MODEL SERVER WITH VLLM")
         print("="*70)
         print("Loading model with tensor parallelism across 8 GPUs...")
         print(f"Model: {model_config.model_name}")
         print(f"Quantization: {model_config.quantization}")
         
-        # Initialize policy network - will automatically shard across GPUs
-        self.policy = PolicyNetwork(model_config)
+        # Initialize vLLM for fast inference
+        self.llm = LLM(
+            model=model_config.model_name,
+            tensor_parallel_size=8,
+            gpu_memory_utilization=0.90,
+            max_model_len=2048,
+            trust_remote_code=True,
+            quantization="bitsandbytes" if model_config.quantization else None,
+            dtype="half"
+        )
         
-        # Initialize value network (smaller, sits on top of policy)
-        self.value = ValueNetwork(self.policy, hidden_size=768)
+        # Sampling params for generation
+        self.sampling_params = SamplingParams(
+            temperature=0.7,
+            max_tokens=512,
+            top_p=0.95,
+        )
         
         # Store config
         self.model_config = model_config
         
-        # Initialize optimizers for training updates
-        self.policy_optimizer = torch.optim.AdamW(
-            self.policy.model.parameters(),
-            lr=1e-5,
-            weight_decay=0.01
-        )
-        
-        self.value_optimizer = torch.optim.AdamW(
-            self.value.value_head.parameters(),
-            lr=1e-4
-        )
-        
-        print(f"✓ Model loaded and sharded")
-        print(f"  Total parameters: {self.policy.get_total_parameters():,}")
-        print(f"  Device map: {self.policy.model.hf_device_map if hasattr(self.policy.model, 'hf_device_map') else 'auto'}")
+        print(f"✓ vLLM initialized and model sharded across 8 GPUs")
         print("="*70 + "\n")
     
     # ------------------------------------------------------------------------
@@ -95,77 +94,39 @@ class SharedModelServer:
         self, 
         states: List[str], 
         max_new_tokens: int = 512,
-        temperature: float = 0.0
+        temperature: float = 0.7
     ) -> Tuple[List[str], List[torch.Tensor]]:
         """
-        Generate actions for a BATCH of states.
+        Generate actions for a BATCH of states using vLLM.
         
-        This is the key optimization: instead of processing states one-by-one,
-        we process them all together. This keeps all 8 GPUs busy.
+        vLLM handles batching automatically and efficiently.
         
         Args:
             states: List of prompt strings
             max_new_tokens: Max tokens to generate per state
-            temperature: Sampling temperature (0.0 = greedy)
+            temperature: Sampling temperature
         
         Returns:
             actions: List of generated code strings
-            log_probs: List of log probabilities (dummy for greedy)
+            log_probs: List of log probabilities (placeholder)
         """
-        self.policy.model.eval()
+        print(f"  [ModelServer] Generating for {len(states)} states with vLLM")
         
-        actions = []
-        log_probs = []
+        # Update sampling params
+        sampling_params = SamplingParams(
+            temperature=temperature,
+            max_tokens=max_new_tokens,
+            top_p=0.95,
+        )
         
-        # Process in mini-batches to avoid OOM
-        # With 8x A100 40GB and 34B model, we can handle batches of ~8-16
-        batch_size = 8
+        # Generate with vLLM (automatically batched and optimized!)
+        outputs = self.llm.generate(states, sampling_params)
         
-        print(f"  [ModelServer] Generating for {len(states)} states in batches of {batch_size}")
+        # Extract generated text
+        actions = [output.outputs[0].text for output in outputs]
         
-        for i in range(0, len(states), batch_size):
-            batch_states = states[i:i+batch_size]
-            
-            # Tokenize the batch
-            # padding=True ensures all sequences in batch have same length
-            inputs = self.policy.tokenizer(
-                batch_states,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=2048
-            )
-            
-            # Move to the first device (model is sharded, so input goes to first GPU)
-            # The model's device_map will handle distributing computation
-            first_device = next(self.policy.model.parameters()).device
-            inputs = {k: v.to(first_device) for k, v in inputs.items()}
-            
-            # Generate for the entire batch at once
-            # This is where all 8 GPUs work together in parallel!
-            with torch.no_grad():
-                outputs = self.policy.model.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature if temperature > 0 else None,
-                    do_sample=temperature > 0,
-                    pad_token_id=self.policy.tokenizer.pad_token_id,
-                    eos_token_id=self.policy.tokenizer.eos_token_id,
-                )
-            
-            # Decode each output in the batch
-            for output in outputs:
-                # Skip the input tokens, only decode the generated part
-                generated_tokens = output[inputs['input_ids'].shape[1]:]
-                action = self.policy.tokenizer.decode(
-                    generated_tokens, 
-                    skip_special_tokens=True
-                )
-                actions.append(action)
-                
-                # For greedy decoding, log_prob is deterministic (not computed here)
-                # For proper RL, you'd want to compute actual log probs during generation
-                log_probs.append(torch.tensor(0.0, dtype=torch.float32))
+        # Placeholder log probs (vLLM can provide these if needed)
+        log_probs = [torch.tensor(0.0, dtype=torch.float32) for _ in actions]
         
         print(f"  [ModelServer] Generated {len(actions)} actions")
         return actions, log_probs
@@ -176,6 +137,7 @@ class SharedModelServer:
         
         Similar to generate_batch, but for value estimation.
         """
+        print(f"  [ModelServer] estimate_values_batch called for {len(states)} states")
         self.value.value_head.eval()
         
         values = []
@@ -204,6 +166,7 @@ class SharedModelServer:
         
         Used during PPO updates to compare new policy vs old policy.
         """
+        print(f"  [ModelServer] compute_log_probs_batch called for {len(states)} state-action pairs")
         log_probs = []
         batch_size = 4  # Smaller batch for gradient computation
         
@@ -223,13 +186,15 @@ class SharedModelServer:
     
     def set_train_mode(self):
         """Set models to training mode."""
-        self.policy.model.train()
-        self.value.value_head.train()
+        print(f"  [ModelServer] Setting models to TRAIN mode")
+        # Note: vLLM doesn't have train mode, this is for future HF integration
+        pass
     
     def set_eval_mode(self):
         """Set models to eval mode."""
-        self.policy.model.eval()
-        self.value.value_head.eval()
+        print(f"  [ModelServer] Setting models to EVAL mode")
+        # Note: vLLM is always in eval mode for inference
+        pass
     
     # ------------------------------------------------------------------------
     # TRAINING UPDATE (PPO)
@@ -250,6 +215,7 @@ class SharedModelServer:
         This runs on the model server (where the actual model lives).
         Returns metrics about the update.
         """
+        print(f"  [ModelServer] update_policy_value called for {len(states)} trajectories")
         self.set_train_mode()
         
         # Move tensors to device
@@ -397,12 +363,15 @@ class TrajectoryCollector:
         Returns:
             Trajectory with reward computed
         """
+        print(f"  [Worker] collect_trajectory called for task")
         trajectory = Trajectory()
         
         # Execute the code in sandbox
+        print(f"  [Worker] Executing code in sandbox...")
         results = self.sandbox.execute(action, task)
         
         # Compute reward based on test results
+        print(f"  [Worker] Computing reward...")
         reward = self.reward_calculator.compute_reward(
             action,
             results,
@@ -410,6 +379,7 @@ class TrajectoryCollector:
         )
         
         # Build trajectory
+        print(f"  [Worker] Reward: {reward:.3f}, building trajectory")
         trajectory.add_step(state, action, reward, log_prob, value)
         
         return trajectory
@@ -585,16 +555,22 @@ class DistributedPPOTrainer:
         3. Update policy and value networks
         4. Return metrics
         """
+        print(f"\n[Trainer] train_step called with {len(tasks)} tasks")
+        
         # Collect trajectories
+        print(f"[Trainer] Collecting trajectories...")
         trajectories = self.collect_trajectories_parallel(tasks)
         
         # Filter out empty trajectories
         trajectories = [t for t in trajectories if not t.is_empty()]
+        print(f"[Trainer] Collected {len(trajectories)} non-empty trajectories")
         
         if not trajectories:
+            print(f"[Trainer] No valid trajectories, returning empty metrics")
             return self._empty_metrics()
         
         # Compute advantages and returns
+        print(f"[Trainer] Computing advantages and returns...")
         for trajectory in trajectories:
             advantages, returns = self.advantage_estimator.compute_advantages_and_returns(
                 trajectory,
@@ -604,10 +580,11 @@ class DistributedPPOTrainer:
             trajectory.returns = returns
         
         # Prepare data for update
+        print(f"[Trainer] Preparing data for PPO update...")
         states, actions, old_log_probs, advantages, returns = self._prepare_update_data(trajectories)
         
         # Update networks on model server
-        print("\nUpdating policy and value networks...")
+        print(f"[Trainer] Updating policy and value networks on model server...")
         update_metrics = ray.get(
             self.model_server.update_policy_value.remote(
                 states,

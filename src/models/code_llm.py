@@ -23,14 +23,19 @@ class CodeLLM:
         Args:
             config: Model configuration
         """
+        print(f"[CodeLLM.__init__] Starting initialization with model: {config.model_name}")
         self.config = config
         self.model = None
         self.tokenizer = None
+        print(f"[CodeLLM.__init__] Loading model...")
         self._load_model()
+        print(f"[CodeLLM.__init__] Loading tokenizer...")
         self._configure_tokenizer()
+        print(f"[CodeLLM.__init__] Initialization complete!")
     
     def _load_model(self):
         """Load the model with appropriate configuration."""
+        print(f"[CodeLLM._load_model] Starting model load...")
         # Determine device
         if self.config.device == "cuda" and not torch.cuda.is_available():
             print("CUDA not available, falling back to CPU")
@@ -39,7 +44,10 @@ class CodeLLM:
             print("MPS not available, falling back to CPU")
             self.config.device = "cpu"
         
+        print(f"[CodeLLM._load_model] Device: {self.config.device}")
+        
         # Configure quantization
+        print(f"[CodeLLM._load_model] Configuring quantization: {self.config.quantization}")
         quantization_config = None
         if self.config.quantization == "4bit":
             quantization_config = BitsAndBytesConfig(
@@ -70,19 +78,25 @@ class CodeLLM:
             model_kwargs["torch_dtype"] = self._get_torch_dtype()
         
         try:
+            print(f"[CodeLLM._load_model] Calling AutoModelForCausalLM.from_pretrained...")
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.config.model_name,
                 **model_kwargs
             )
+            print(f"[CodeLLM._load_model] Model loaded from pretrained!")
             
             # Move to device if not using quantization
             if not quantization_config and self.config.device != "cpu":
+                print(f"[CodeLLM._load_model] Moving model to {self.config.device}...")
                 self.model = self.model.to(self.config.device)
             
             # Configure trainable layers
+            print(f"[CodeLLM._load_model] Configuring trainable layers...")
             self._configure_trainable_layers()
+            print(f"[CodeLLM._load_model] Model fully loaded!")
             
         except Exception as e:
+            print(f"[CodeLLM._load_model] ERROR: {e}")
             raise RuntimeError(f"Failed to load model {self.config.model_name}: {e}")
     
     def _configure_tokenizer(self):

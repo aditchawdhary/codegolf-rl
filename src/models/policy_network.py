@@ -19,7 +19,9 @@ class PolicyNetwork(CodeLLM):
         Args:
             config: Model configuration
         """
+        print(f"[PolicyNetwork.__init__] Starting initialization...")
         super().__init__(config)
+        print(f"[PolicyNetwork.__init__] Initialization complete!")
     
     def sample_action(
         self,

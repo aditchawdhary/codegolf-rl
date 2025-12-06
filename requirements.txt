@@ -4,6 +4,7 @@ transformers>=4.35.0
 accelerate>=0.24.0
 bitsandbytes>=0.41.0  # For quantization
 peft>=0.6.0  # For LoRA
+vllm>=0.6.0  # For fast distributed inference
 
 # Reinforcement Learning
 gymnasium>=0.29.0

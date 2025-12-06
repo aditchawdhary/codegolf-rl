@@ -20,14 +20,18 @@ class ValueNetwork(nn.Module):
             base_model: Base LLM to extract features from
             hidden_size: Hidden layer size
         """
+        print(f"[ValueNetwork.__init__] Starting initialization...")
         super().__init__()
         self.base_model = base_model
         self.hidden_size = hidden_size
         
         # Value head - maps from model hidden size to scalar value
         # Get the model's hidden size
+        print(f"[ValueNetwork.__init__] Getting model hidden size...")
         model_hidden_size = base_model.model.config.hidden_size
+        print(f"[ValueNetwork.__init__] Model hidden size: {model_hidden_size}")
         
+        print(f"[ValueNetwork.__init__] Creating value head layers...")
         self.value_head = nn.Sequential(
             nn.Linear(model_hidden_size, hidden_size),
             nn.ReLU(),
@@ -37,9 +41,12 @@ class ValueNetwork(nn.Module):
         )
         
         # Move value head to same device and dtype as base model
+        print(f"[ValueNetwork.__init__] Moving value head to device...")
         device = base_model.model.device
         dtype = base_model.model.dtype
+        print(f"[ValueNetwork.__init__] Device: {device}, dtype: {dtype}")
         self.value_head = self.value_head.to(device=device, dtype=dtype)
+        print(f"[ValueNetwork.__init__] Value network initialization complete!")
     
     def estimate_value(self, state: str) -> torch.Tensor:
         """
