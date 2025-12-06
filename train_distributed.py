@@ -36,8 +36,22 @@ class SharedModelServer:
         print(f"  Total parameters: {self.policy.get_total_parameters():,}")
     
     def sample_action(self, state: str, max_new_tokens: int = 512):
-        """Sample action from policy."""
-        return self.policy.sample_action(state, max_new_tokens=max_new_tokens)
+        """Sample action from policy using greedy decoding."""
+        try:
+            # Ensure model is in eval mode for generation
+            self.policy.model.eval()
+            # Use greedy decoding (temperature=0) to avoid sampling issues
+            return self.policy.sample_action(
+                state, 
+                max_new_tokens=max_new_tokens,
+                temperature=0.0  # Greedy decoding
+            )
+        except Exception as e:
+            print(f"Error in sample_action: {e}")
+            import traceback
+            traceback.print_exc()
+            # Return empty code and zero log prob on error
+            return "", torch.tensor(0.0)
     
     def estimate_value(self, state: str):
         """Estimate value of state."""
