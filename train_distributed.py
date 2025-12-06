@@ -402,7 +402,7 @@ def parse_args():
 
 def main():
     """Main distributed training function."""
-    args = parser.parse_args()
+    args = parse_args()
     
     print("="*60)
     print("Distributed LLM-RL Code Golf Training")
