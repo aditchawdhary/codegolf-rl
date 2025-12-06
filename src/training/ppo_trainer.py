@@ -186,13 +186,14 @@ class PPOTrainer:
             trajectories
         )
         
-        # Get device from policy model
+        # Get device and dtype from policy model
         device = self.policy.model.device
+        dtype = next(self.policy.model.parameters()).dtype
         
-        # Move tensors to device
-        old_log_probs = old_log_probs.to(device)
-        advantages = advantages.to(device)
-        returns = returns.to(device)
+        # Move tensors to device and convert dtype
+        old_log_probs = old_log_probs.to(device=device, dtype=dtype)
+        advantages = advantages.to(device=device, dtype=dtype)
+        returns = returns.to(device=device, dtype=dtype)
         
         # PPO epochs
         for epoch in range(self.config.num_epochs):
