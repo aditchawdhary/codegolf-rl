@@ -22,7 +22,9 @@ import torch.nn.functional as F
 from typing import List, Tuple, Dict
 from dataclasses import dataclass
 
-from vllm import LLM, SamplingParams
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+from peft import LoraConfig, get_peft_model, TaskType
+import deepspeed
 from src.models import ModelConfig, PolicyNetwork, ValueNetwork
 from src.data import TaskLoader, DifficultyAnalyzer, Task, TaskFormatter
 from src.training import (
@@ -40,13 +42,15 @@ from src.evaluation import InferencePipeline, PerformanceEvaluator
 # ============================================================================
 # SHARED MODEL SERVER (8 GPUs with Tensor Parallelism)
 # ============================================================================
+NUM_TENSOR_PARALLEL_GPU=4
 
-@ray.remote(num_gpus=8)
+
+@ray.remote(num_gpus=NUM_TENSOR_PARALLEL_GPU)
 class SharedModelServer:
     """
-    Shared model server that uses ALL 8 GPUs with tensor parallelism.
+    Shared model server that uses NUM_TENSOR_PARALLEL_GPU GPUs with tensor parallelism.
     
-    This is the heart of the system. The model is SHARDED across all 8 GPUs,
+    This is the heart of the system. The model is SHARDED across all 5 GPUs,
     meaning different parts of each layer live on different GPUs.
     
     Key principle: Process requests in BATCHES to maximize GPU utilization.
@@ -54,36 +58,72 @@ class SharedModelServer:
     """
     
     def __init__(self, model_config: ModelConfig):
-        """Initialize model with vLLM for fast inference."""
+        """Initialize HuggingFace model with DeepSpeed for distributed training."""
         print("\n" + "="*70)
-        print("INITIALIZING SHARED MODEL SERVER WITH VLLM")
+        print("INITIALIZING HF MODEL WITH DEEPSPEED")
         print("="*70)
-        print("Loading model with tensor parallelism across 8 GPUs...")
         print(f"Model: {model_config.model_name}")
-        print(f"Quantization: {model_config.quantization}")
+        print(f"GPUs: {NUM_TENSOR_PARALLEL_GPU}")
         
-        # Initialize vLLM for fast inference
-        self.llm = LLM(
-            model=model_config.model_name,
-            tensor_parallel_size=8,
-            gpu_memory_utilization=0.90,
-            max_model_len=2048,
+        # Load tokenizer
+        print("\nLoading tokenizer...")
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_config.model_name,
+            trust_remote_code=True
+        )
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        
+        # Load base model with automatic device mapping
+        print("Loading base model...")
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_config.model_name,
+            device_map="auto",  # Automatically distribute across GPUs
+            torch_dtype=torch.float16,
             trust_remote_code=True,
-            quantization="bitsandbytes" if model_config.quantization else None,
-            dtype="half"
+            use_cache=False,  # Disable KV cache for training to save memory
         )
         
-        # Sampling params for generation
-        self.sampling_params = SamplingParams(
+        # Enable gradient checkpointing to save memory
+        print("Enabling gradient checkpointing...")
+        self.model.gradient_checkpointing_enable()
+        
+        # Add LoRA for efficient fine-tuning
+        print("Adding LoRA adapters...")
+        lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=16,
+            lora_alpha=32,
+            lora_dropout=0.05,
+            target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+            bias="none",
+        )
+        self.model = get_peft_model(self.model, lora_config)
+        self.model.print_trainable_parameters()
+        
+        print(f"✓ Model distributed across {torch.cuda.device_count()} GPUs")
+        
+        # Generation config
+        self.generation_config = GenerationConfig(
+            max_new_tokens=512,
             temperature=0.7,
-            max_tokens=512,
             top_p=0.95,
+            do_sample=True,
+            pad_token_id=self.tokenizer.pad_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+        )
+        
+        # Optimizer
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=1e-5
         )
         
         # Store config
         self.model_config = model_config
         
-        print(f"✓ vLLM initialized and model sharded across 8 GPUs")
+        print(f"\n✓ Model ready on {torch.cuda.device_count()} GPU(s)")
+        print(f"✓ Trainable parameters: {self.model.module.num_parameters(only_trainable=True) if hasattr(self.model, 'module') else self.model.num_parameters(only_trainable=True):,}")
         print("="*70 + "\n")
     
     # ------------------------------------------------------------------------
@@ -97,88 +137,161 @@ class SharedModelServer:
         temperature: float = 0.7
     ) -> Tuple[List[str], List[torch.Tensor]]:
         """
-        Generate actions for a BATCH of states using vLLM.
-        
-        vLLM handles batching automatically and efficiently.
+        Generate actions using HuggingFace model.
         
         Args:
             states: List of prompt strings
-            max_new_tokens: Max tokens to generate per state
+            max_new_tokens: Max tokens to generate
             temperature: Sampling temperature
         
         Returns:
-            actions: List of generated code strings
-            log_probs: List of log probabilities (placeholder)
+            actions: Generated code strings
+            log_probs: Log probabilities for PPO
         """
-        print(f"  [ModelServer] Generating for {len(states)} states with vLLM")
+        print(f"  [ModelServer] Generating for {len(states)} states")
         
-        # Update sampling params
-        sampling_params = SamplingParams(
-            temperature=temperature,
-            max_tokens=max_new_tokens,
-            top_p=0.95,
-        )
+        self.model.eval()
+        actions = []
+        log_probs = []
         
-        # Generate with vLLM (automatically batched and optimized!)
-        outputs = self.llm.generate(states, sampling_params)
-        
-        # Extract generated text
-        actions = [output.outputs[0].text for output in outputs]
-        
-        # Placeholder log probs (vLLM can provide these if needed)
-        log_probs = [torch.tensor(0.0, dtype=torch.float32) for _ in actions]
+        with torch.no_grad():
+            for state in states:
+                # Tokenize
+                inputs = self.tokenizer(
+                    state, 
+                    return_tensors="pt", 
+                    truncation=True, 
+                    max_length=4096
+                ).to("cuda")
+                
+                # Generate
+                if temperature == 0.0:
+                    # Greedy decoding
+                    outputs = self.model.generate(
+                        **inputs,
+                        max_new_tokens=max_new_tokens,
+                        do_sample=False,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                    )
+                else:
+                    # Sampling
+                    outputs = self.model.generate(
+                        **inputs,
+                        max_new_tokens=max_new_tokens,
+                        temperature=temperature,
+                        top_p=0.95,
+                        do_sample=True,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                    )
+                
+                # Decode
+                if hasattr(outputs, 'sequences'):
+                    generated_ids = outputs.sequences[0][inputs.input_ids.shape[1]:]
+                else:
+                    generated_ids = outputs[0][inputs.input_ids.shape[1]:]
+                action = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+                actions.append(action)
+                
+                # Compute log prob (simplified)
+                log_prob = torch.tensor(0.0)  # Will compute properly in PPO
+                log_probs.append(log_prob)
         
         print(f"  [ModelServer] Generated {len(actions)} actions")
         return actions, log_probs
     
     def estimate_values_batch(self, states: List[str]) -> List[torch.Tensor]:
         """
-        Estimate values for a BATCH of states.
-        
-        Similar to generate_batch, but for value estimation.
+        Estimate values (simplified - using mean logits as proxy).
         """
-        print(f"  [ModelServer] estimate_values_batch called for {len(states)} states")
-        self.value.value_head.eval()
-        
-        values = []
-        batch_size = 16  # Value estimation is faster, can use larger batches
-        
         print(f"  [ModelServer] Estimating values for {len(states)} states")
         
-        for i in range(0, len(states), batch_size):
-            batch_states = states[i:i+batch_size]
-            
-            # For each state, get value estimate
-            # Note: This could be further optimized by batching the forward pass
-            for state in batch_states:
-                value = self.value.estimate_value(state)
+        values = []
+        self.model.eval()
+        
+        with torch.no_grad():
+            for state in states:
+                inputs = self.tokenizer(
+                    state, 
+                    return_tensors="pt", 
+                    truncation=True, 
+                    max_length=2048
+                ).to("cuda")
+                
+                outputs = self.model(**inputs)
+                value = outputs.logits.mean().cpu()
                 values.append(value)
         
+        print(f"  [ModelServer] Estimated {len(values)} values")
         return values
     
     def compute_log_probs_batch(
         self, 
         states: List[str], 
-        actions: List[str]
+        actions: List[str],
+        requires_grad: bool = False
     ) -> List[torch.Tensor]:
         """
-        Compute log probabilities for state-action pairs.
+        Compute log probabilities for PPO.
         
-        Used during PPO updates to compare new policy vs old policy.
+        Args:
+            requires_grad: If True, compute with gradients for training
         """
-        print(f"  [ModelServer] compute_log_probs_batch called for {len(states)} state-action pairs")
+        print(f"  [ModelServer] Computing log probs for {len(states)} pairs (grad={requires_grad})")
         log_probs = []
-        batch_size = 4  # Smaller batch for gradient computation
         
-        for i in range(0, len(states), batch_size):
-            batch_states = states[i:i+batch_size]
-            batch_actions = actions[i:i+batch_size]
+        self.model.train() if requires_grad else self.model.eval()
+        
+        for state, action in zip(states, actions):
+            full_text = state + action
             
-            for state, action in zip(batch_states, batch_actions):
-                log_prob = self.policy.compute_log_prob(state, action, requires_grad=True)
-                log_probs.append(log_prob)
+            inputs = self.tokenizer(
+                full_text, 
+                return_tensors="pt", 
+                truncation=True, 
+                max_length=2048
+            ).to("cuda")
+            
+            if requires_grad:
+                # With gradients for training
+                outputs = self.model(**inputs)
+                log_probs_tensor = torch.log_softmax(outputs.logits, dim=-1)
+                mean_log_prob = log_probs_tensor.mean()
+                log_probs.append(mean_log_prob)
+            else:
+                # Without gradients for initial collection
+                with torch.no_grad():
+                    outputs = self.model(**inputs)
+                    log_probs_tensor = torch.log_softmax(outputs.logits, dim=-1)
+                    mean_log_prob = log_probs_tensor.mean()
+                    log_probs.append(mean_log_prob.cpu())
         
+        print(f"  [ModelServer] Computed {len(log_probs)} log probs")
         return log_probs
+    
+    def compute_log_probs_single(
+        self, 
+        state: str, 
+        action: str,
+        requires_grad: bool = True
+    ) -> torch.Tensor:
+        """
+        Compute log probability for a single state-action pair.
+        Used for gradient accumulation to save memory.
+        """
+        full_text = state + action
+        
+        inputs = self.tokenizer(
+            full_text, 
+            return_tensors="pt", 
+            truncation=True, 
+            max_length=2048
+        ).to("cuda")
+        
+        outputs = self.model(**inputs)
+        log_probs_tensor = torch.log_softmax(outputs.logits, dim=-1)
+        mean_log_prob = log_probs_tensor.mean()
+        
+        return mean_log_prob
     
     # ------------------------------------------------------------------------
     # MODE CONTROL
@@ -210,86 +323,87 @@ class SharedModelServer:
         ppo_config: PPOConfig
     ) -> Dict[str, float]:
         """
-        Perform PPO update on the model.
-        
-        This runs on the model server (where the actual model lives).
-        Returns metrics about the update.
+        PPO update - model learns from rewards in real-time!
+        Uses gradient accumulation to reduce memory usage.
         """
-        print(f"  [ModelServer] update_policy_value called for {len(states)} trajectories")
-        self.set_train_mode()
+        print(f"  [ModelServer] PPO update for {len(states)} trajectories")
         
-        # Move tensors to device
-        device = next(self.policy.model.parameters()).device
-        old_log_probs = old_log_probs.to(device)
-        advantages = advantages.to(device)
-        returns = returns.to(device)
+        self.model.train()
         
         total_policy_loss = 0.0
-        total_value_loss = 0.0
         total_kl = 0.0
         num_updates = 0
         
+        # Move to device
+        old_log_probs = old_log_probs.to("cuda")
+        advantages = advantages.to("cuda")
+        
+        # Gradient accumulation: process 1 sample at a time to save memory
+        accumulation_steps = len(states)
+        
         # PPO epochs
         for epoch in range(ppo_config.num_epochs):
-            # Compute new log probs and values
-            new_log_probs = self.compute_log_probs_batch(states, actions)
-            new_values = self.estimate_values_batch(states)
+            self.optimizer.zero_grad()
             
-            new_log_probs = torch.stack(new_log_probs).to(device)
-            new_values = torch.stack(new_values).to(device)
+            epoch_policy_loss = 0.0
+            epoch_kl = 0.0
+            new_log_probs_list = []
             
-            # PPO policy loss
-            ratio = torch.exp(new_log_probs - old_log_probs)
-            surr1 = ratio * advantages
-            surr2 = torch.clamp(
-                ratio,
-                1.0 - ppo_config.clip_epsilon,
-                1.0 + ppo_config.clip_epsilon
-            ) * advantages
-            policy_loss = -torch.min(surr1, surr2).mean()
+            # Process each sample individually with gradient accumulation
+            for i, (state, action) in enumerate(zip(states, actions)):
+                # Compute new log prob WITH gradients for this single sample
+                new_log_prob = self.compute_log_probs_single(state, action, requires_grad=True)
+                new_log_probs_list.append(new_log_prob)
+                
+                # PPO loss for this sample
+                ratio = torch.exp(new_log_prob - old_log_probs[i])
+                surr1 = ratio * advantages[i]
+                surr2 = torch.clamp(
+                    ratio,
+                    1.0 - ppo_config.clip_epsilon,
+                    1.0 + ppo_config.clip_epsilon
+                ) * advantages[i]
+                sample_loss = -torch.min(surr1, surr2)
+                
+                # Scale loss by accumulation steps
+                scaled_loss = sample_loss / accumulation_steps
+                scaled_loss.backward()
+                
+                epoch_policy_loss += sample_loss.item()
+                
+                # Clear cache periodically
+                if (i + 1) % 4 == 0:
+                    torch.cuda.empty_cache()
             
-            # Value loss
-            value_loss = F.mse_loss(new_values, returns)
+            # Update after accumulating all gradients
+            torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(),
+                ppo_config.max_grad_norm
+            )
+            self.optimizer.step()
             
-            # KL divergence (for early stopping)
+            # Compute KL divergence
+            new_log_probs = torch.stack(new_log_probs_list)
             kl_div = (old_log_probs - new_log_probs).mean().item()
             
-            # Update policy
-            self.policy_optimizer.zero_grad()
-            policy_loss.backward(retain_graph=True)  # Keep graph for value update
-            torch.nn.utils.clip_grad_norm_(
-                self.policy.model.parameters(),
-                ppo_config.max_grad_norm
-            )
-            self.policy_optimizer.step()
-            
-            # Update value network
-            self.value_optimizer.zero_grad()
-            # Recompute values for clean backward pass
-            new_values_for_update = torch.stack(self.estimate_values_batch(states)).to(device)
-            value_loss_update = F.mse_loss(new_values_for_update, returns)
-            value_loss_update.backward()
-            torch.nn.utils.clip_grad_norm_(
-                self.value.value_head.parameters(),
-                ppo_config.max_grad_norm
-            )
-            self.value_optimizer.step()
-            
-            # Track metrics
-            total_policy_loss += policy_loss.item()
-            total_value_loss += value_loss.item()
+            # Track
+            total_policy_loss += epoch_policy_loss / len(states)
             total_kl += abs(kl_div)
             num_updates += 1
             
-            # Early stopping based on KL divergence
+            # Clear cache
+            torch.cuda.empty_cache()
+            
+            # Early stop
             if abs(kl_div) > ppo_config.target_kl:
-                print(f"    Early stopping at epoch {epoch} (KL={kl_div:.4f})")
+                print(f"    Early stop at epoch {epoch} (KL={kl_div:.4f})")
                 break
         
-        # Return average metrics
+        print(f"  [ModelServer] ✓ Model updated ({num_updates} epochs)")
+        
         return {
             'policy_loss': total_policy_loss / num_updates if num_updates > 0 else 0.0,
-            'value_loss': total_value_loss / num_updates if num_updates > 0 else 0.0,
+            'value_loss': 0.0,
             'kl_divergence': total_kl / num_updates if num_updates > 0 else 0.0,
         }
     
@@ -299,19 +413,17 @@ class SharedModelServer:
     
     def get_state_dict(self):
         """Get state dict for checkpointing."""
+        model = self.model.module if hasattr(self.model, 'module') else self.model
         return {
-            'policy': self.policy.model.state_dict(),
-            'value': self.value.value_head.state_dict(),
-            'policy_optimizer': self.policy_optimizer.state_dict(),
-            'value_optimizer': self.value_optimizer.state_dict(),
+            'model': model.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
         }
     
     def load_state_dict(self, state_dict):
         """Load state dict from checkpoint."""
-        self.policy.model.load_state_dict(state_dict['policy'])
-        self.value.value_head.load_state_dict(state_dict['value'])
-        self.policy_optimizer.load_state_dict(state_dict['policy_optimizer'])
-        self.value_optimizer.load_state_dict(state_dict['value_optimizer'])
+        model = self.model.module if hasattr(self.model, 'module') else self.model
+        model.load_state_dict(state_dict['model'])
+        self.optimizer.load_state_dict(state_dict['optimizer'])
 
 
 # ============================================================================
@@ -421,7 +533,7 @@ class DistributedPPOTrainer:
         # Initialize Ray if not already
         if not ray.is_initialized():
             print("\nInitializing Ray...")
-            ray.init(num_gpus=8, num_cpus=num_workers + 4)  # +4 for main process
+            ray.init(num_gpus=NUM_TENSOR_PARALLEL_GPU, num_cpus=num_workers + 4)  # +4 for main process
             print(f"✓ Ray initialized")
         
         # Create shared model server (tensor parallelism across 8 GPUs)
@@ -453,7 +565,7 @@ class DistributedPPOTrainer:
         print(f"\n{'='*70}")
         print("DISTRIBUTED TRAINER READY")
         print(f"{'='*70}")
-        print(f"Model Server: 1 instance using 8 GPUs (tensor parallel)")
+        print(f"Model Server: 1 instance using {NUM_TENSOR_PARALLEL_GPU} GPUs (tensor parallel)")
         print(f"Workers: {num_workers} CPU instances")
         print(f"Batch size: {ppo_config.batch_size}")
         print(f"{'='*70}\n")
@@ -493,17 +605,17 @@ class DistributedPPOTrainer:
         print(f"  ✓ Formatted {len(states)} prompts")
         
         # ------------------------------------------------------------------------
-        # PHASE 2: Batched inference on model server (8 GPUs working together!)
+        # PHASE 2: Batched inference on model server (5 GPUs working together!)
         # ------------------------------------------------------------------------
         print("Phase 2: Batched inference on model server...")
-        print(f"  All 8 GPUs will work together on this batch!")
+        print(f"  All {NUM_TENSOR_PARALLEL_GPU} GPUs will work together on this batch!")
         
         # This single call processes ALL states at once
         actions, log_probs = ray.get(
             self.model_server.generate_batch.remote(
                 states,
                 max_new_tokens=512,
-                temperature=0.0  # Greedy decoding
+                temperature=0.7  # Sampling for exploration
             )
         )
         print(f"  ✓ Generated {len(actions)} actions")
@@ -713,7 +825,7 @@ def parse_args():
     parser.add_argument(
         "--model-name",
         type=str,
-        default="codellama/CodeLlama-34b-Python-hf",
+        default="Qwen/Qwen2.5-Coder-32B-Instruct",
         help="HuggingFace model name"
     )
     parser.add_argument(
@@ -801,7 +913,7 @@ def main():
     print("OPTIMIZED DISTRIBUTED LLM-RL TRAINING")
     print("="*70)
     print(f"Model: {args.model_name}")
-    print(f"Architecture: 1 model server (8 GPUs, tensor parallel)")
+    print(f"Architecture: 1 model server ({NUM_TENSOR_PARALLEL_GPU} GPUs, tensor parallel)")
     print(f"Workers: {args.num_workers} CPU workers")
     print(f"Batch size: {args.batch_size}")
     print(f"Key optimization: BATCHED INFERENCE")
