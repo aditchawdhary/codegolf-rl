@@ -220,21 +220,15 @@ class PPOTrainer:
             ) * advantages
             policy_loss = -torch.min(surr1, surr2).mean()
             
-            # Compute value loss
+            # Compute value loss (detach for separate backward pass)
             value_loss = F.mse_loss(new_values, returns)
             
             # Compute KL divergence for early stopping
             kl_div = (old_log_probs - new_log_probs).mean().item()
             
-            # Total loss
-            loss = (
-                policy_loss +
-                self.config.value_loss_coef * value_loss
-            )
-            
-            # Update policy
+            # Update policy network
             self.policy_optimizer.zero_grad()
-            loss.backward()
+            policy_loss.backward()
             
             # Clip gradients
             grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -244,9 +238,16 @@ class PPOTrainer:
             
             self.policy_optimizer.step()
             
-            # Update value network separately
+            # Update value network separately (recompute to avoid graph issues)
             self.value_optimizer.zero_grad()
-            value_loss.backward()
+            # Recompute values for clean backward pass
+            new_values_for_value_update = []
+            for state, action in zip(states, actions):
+                value = self.value.estimate_value(state)
+                new_values_for_value_update.append(value)
+            new_values_for_value_update = torch.stack(new_values_for_value_update)
+            value_loss_for_update = F.mse_loss(new_values_for_value_update, returns)
+            value_loss_for_update.backward()
             torch.nn.utils.clip_grad_norm_(
                 self.value.value_head.parameters(),
                 self.config.max_grad_norm
