@@ -25,9 +25,9 @@ def parse_args():
     
     # Model arguments
     parser.add_argument(
-        "--model-name",
-        type=str,
-        default="gpt2",
+        "--model-name", 
+        type=str, 
+        default="Qwen/Qwen2.5-Coder-32B-Instruct",
         help="HuggingFace model name"
     )
     parser.add_argument(
@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument(
         "--quantization",
         type=str,
-        default=None,
+        default="8bit",
         choices=["4bit", "8bit", None],
         help="Model quantization"
     )

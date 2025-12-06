@@ -2,11 +2,12 @@
 
 # Model Configuration
 model:
-  name: "codellama/CodeLlama-7b-Python-hf"  # Base model
+  name: "Qwen/Qwen2.5-Coder-32B-Instruct"   # Base model
   max_length: 2048
   temperature: 0.8
   top_p: 0.95
-  quantization: "4bit"  # Options: null, "4bit", "8bit"
+  quantization: "8bit"  # Options: [null, "4bit", "8bit"]
+  trust_remote_code: true 
   
   # LoRA Configuration
   lora:

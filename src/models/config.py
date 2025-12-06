@@ -19,17 +19,17 @@ class LoRAConfig:
 @dataclass
 class ModelConfig:
     """Configuration for the base LLM."""
-    model_name: str = "codellama/CodeLlama-7b-Python-hf"
+    model_name: str = "Qwen/Qwen2.5-Coder-32B-Instruct"
     max_length: int = 2048
     temperature: float = 0.8
     top_p: float = 0.95
     top_k: int = 50
-    quantization: Optional[str] = None  # "4bit", "8bit", or None
+    quantization: Optional[str] = "8bit"
     lora_config: Optional[LoRAConfig] = None
     trainable_layers: List[str] = field(default_factory=list)
-    device: str = "cuda"  # "cuda", "cpu", or "mps"
+    device: str = "cuda"
     torch_dtype: str = "float16"  # "float32", "float16", "bfloat16"
-    trust_remote_code: bool = False
+    trust_remote_code: bool = True
     use_cache: bool = True
     
     def to_dict(self) -> Dict[str, Any]:
