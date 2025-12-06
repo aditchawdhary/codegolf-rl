@@ -186,6 +186,14 @@ class PPOTrainer:
             trajectories
         )
         
+        # Get device from policy model
+        device = self.policy.model.device
+        
+        # Move tensors to device
+        old_log_probs = old_log_probs.to(device)
+        advantages = advantages.to(device)
+        returns = returns.to(device)
+        
         # PPO epochs
         for epoch in range(self.config.num_epochs):
             # Compute new log probs and values
