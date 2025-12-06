@@ -140,16 +140,6 @@ class DistributedPPOTrainer:
         
         print(f"✓ {num_workers} workers ready")
         
-        # Optimizers
-        self.policy_optimizer = torch.optim.Adam(
-            self.policy.model.parameters(),
-            lr=ppo_config.learning_rate
-        )
-        self.value_optimizer = torch.optim.Adam(
-            self.value.value_head.parameters(),
-            lr=ppo_config.learning_rate
-        )
-        
         # Advantage estimator
         from src.training import AdvantageEstimator
         self.advantage_estimator = AdvantageEstimator(
@@ -158,6 +148,8 @@ class DistributedPPOTrainer:
         )
         
         self.step = 0
+        
+        # Note: Optimizers will be created on the model server side for updates
         print("✓ Distributed PPO trainer initialized")
     
     def collect_trajectories_parallel(self, tasks: List[Task]) -> List[Trajectory]:
@@ -186,7 +178,7 @@ class DistributedPPOTrainer:
         if not trajectories or all(t.is_empty() for t in trajectories):
             return self._empty_metrics()
         
-        # Compute advantages (on central GPU)
+        # Compute advantages
         for trajectory in trajectories:
             advantages, returns = self.advantage_estimator.compute_advantages_and_returns(
                 trajectory,
@@ -195,10 +187,11 @@ class DistributedPPOTrainer:
             trajectory.advantages = advantages
             trajectory.returns = returns
         
-        # Update networks (on central GPU)
-        from src.training.ppo_trainer import PPOTrainer
-        # Reuse the update logic from single-GPU trainer
-        policy_loss, value_loss, kl_div = self._update_networks(trajectories)
+        # TODO: Implement PPO update on shared model
+        # For now, just compute metrics without updating
+        policy_loss = 0.0
+        value_loss = 0.0
+        kl_div = 0.0
         
         # Compute metrics
         metrics = self._compute_metrics(trajectories, policy_loss, value_loss, kl_div)
