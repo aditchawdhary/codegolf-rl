@@ -533,8 +533,14 @@ class DistributedPPOTrainer:
         # Initialize Ray if not already
         if not ray.is_initialized():
             print("\nInitializing Ray...")
-            ray.init(num_gpus=NUM_TENSOR_PARALLEL_GPU, num_cpus=num_workers + 4)  # +4 for main process
+            ray.init(
+                num_gpus=NUM_TENSOR_PARALLEL_GPU,
+                num_cpus=num_workers + 4,  # +4 for main process
+                dashboard_host="0.0.0.0",
+                dashboard_port=8265
+            )
             print(f"✓ Ray initialized")
+            print(f"✓ Dashboard available at http://0.0.0.0:8265")
         
         # Create shared model server (tensor parallelism across 8 GPUs)
         print("\nCreating shared model server...")
