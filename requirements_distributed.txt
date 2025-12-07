@@ -1,3 +1,5 @@
 # Additional requirements for distributed training
 ray[default]>=2.9.0
 vllm>=0.6.0  # For fast distributed inference
+hf_transfer
+deepspeed
