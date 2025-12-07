@@ -148,102 +148,102 @@ def create_model_server_class(num_gpus):
             Returns:
                 actions: Generated code strings
                 log_probs: Log probabilities for PPO
-        """
-        print(f"  [ModelServer] Generating for {len(states)} states")
-        
-        self.model.eval()
-        actions = []
-        log_probs = []
-        
-        with torch.no_grad():
-            for state in states:
-                # Tokenize
-                inputs = self.tokenizer(
-                    state, 
-                    return_tensors="pt", 
-                    truncation=True, 
-                    max_length=4096
-                ).to("cuda")
+            """
+            print(f"  [ModelServer] Generating for {len(states)} states")
+            
+            self.model.eval()
+            actions = []
+            log_probs = []
+            
+            with torch.no_grad():
+                for state in states:
+                  # Tokenize
+                  inputs = self.tokenizer(
+                      state, 
+                      return_tensors="pt", 
+                      truncation=True, 
+                      max_length=4096
+                  ).to("cuda")
+                  
+                  # Generate
+                  if temperature == 0.0:
+                      # Greedy decoding
+                      outputs = self.model.generate(
+                          **inputs,
+                          max_new_tokens=max_new_tokens,
+                          do_sample=False,
+                          pad_token_id=self.tokenizer.pad_token_id,
+                      )
+                  else:
+                      # Sampling
+                      outputs = self.model.generate(
+                          **inputs,
+                          max_new_tokens=max_new_tokens,
+                          temperature=temperature,
+                          top_p=0.95,
+                          do_sample=True,
+                          pad_token_id=self.tokenizer.pad_token_id,
+                      )
+                  
+                  # Decode
+                  if hasattr(outputs, 'sequences'):
+                      generated_ids = outputs.sequences[0][inputs.input_ids.shape[1]:]
+                  else:
+                      generated_ids = outputs[0][inputs.input_ids.shape[1]:]
+                  action = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+                  actions.append(action)
                 
-                # Generate
-                if temperature == 0.0:
-                    # Greedy decoding
-                    outputs = self.model.generate(
-                        **inputs,
-                        max_new_tokens=max_new_tokens,
-                        do_sample=False,
-                        pad_token_id=self.tokenizer.pad_token_id,
-                    )
-                else:
-                    # Sampling
-                    outputs = self.model.generate(
-                        **inputs,
-                        max_new_tokens=max_new_tokens,
-                        temperature=temperature,
-                        top_p=0.95,
-                        do_sample=True,
-                        pad_token_id=self.tokenizer.pad_token_id,
-                    )
-                
-                # Decode
-                if hasattr(outputs, 'sequences'):
-                    generated_ids = outputs.sequences[0][inputs.input_ids.shape[1]:]
-                else:
-                    generated_ids = outputs[0][inputs.input_ids.shape[1]:]
-                action = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-                actions.append(action)
-                
-                # Compute log prob (simplified)
-                log_prob = torch.tensor(0.0)  # Will compute properly in PPO
-                log_probs.append(log_prob)
+                  # Compute log prob (simplified)
+                  log_prob = torch.tensor(0.0)  # Will compute properly in PPO
+                  log_probs.append(log_prob)
         
-        print(f"  [ModelServer] Generated {len(actions)} actions")
-        return actions, log_probs
+            print(f"  [ModelServer] Generated {len(actions)} actions")
+            return actions, log_probs
     
-    def estimate_values_batch(self, states: List[str]) -> List[torch.Tensor]:
-        """
-        Estimate values (simplified - using mean logits as proxy).
-        """
-        print(f"  [ModelServer] Estimating values for {len(states)} states")
+        def estimate_values_batch(self, states: List[str]) -> List[torch.Tensor]:
+            """
+            Estimate values (simplified - using mean logits as proxy).
+            """
+            print(f"  [ModelServer] Estimating values for {len(states)} states")
         
-        values = []
-        self.model.eval()
+            values = []
+            self.model.eval()
         
-        with torch.no_grad():
-            for state in states:
-                inputs = self.tokenizer(
-                    state, 
-                    return_tensors="pt", 
-                    truncation=True, 
-                    max_length=2048
-                ).to("cuda")
-                
-                outputs = self.model(**inputs)
-                value = outputs.logits.mean().cpu()
-                values.append(value)
-        
-        print(f"  [ModelServer] Estimated {len(values)} values")
-        return values
+            with torch.no_grad():
+                for state in states:
+                    inputs = self.tokenizer(
+                        state, 
+                        return_tensors="pt", 
+                        truncation=True, 
+                        max_length=2048
+                    ).to("cuda")
+                    
+                    outputs = self.model(**inputs)
+                    value = outputs.logits.mean().cpu()
+                    values.append(value)
+            
+            print(f"  [ModelServer] Estimated {len(values)} values")
+            return values
     
-    def compute_log_probs_batch(
-        self, 
-        states: List[str], 
-        actions: List[str],
-        requires_grad: bool = False
-    ) -> List[torch.Tensor]:
-        """
-        Compute log probabilities for PPO.
+        def compute_log_probs_batch(
+            self, 
+            states: List[str], 
+            actions: List[str],
+            requires_grad: bool = False
+        ) -> List[torch.Tensor]:
+            """
+            Compute log probabilities for PPO.
         
-        Args:
+            Args:
             requires_grad: If True, compute with gradients for training
-        """
-        print(f"  [ModelServer] Computing log probs for {len(states)} pairs (grad={requires_grad})")
-        log_probs = []
+            """
+            print(f"  [ModelServer] Computing log probs for {len(states)} pairs (grad={requires_grad})")
+            log_probs = []
         
-        self.model.train() if requires_grad else self.model.eval()
+            self.model.train() if requires_grad else self.model.eval()
         
-        for state, action in zip(states, actions):
-            full_text = state + action
+            for state, action in zip(states, actions):
+                full_text = state + action
             
             inputs = self.tokenizer(
                 full_text, 
@@ -266,159 +266,159 @@ def create_model_server_class(num_gpus):
                     mean_log_prob = log_probs_tensor.mean()
                     log_probs.append(mean_log_prob.cpu())
         
-        print(f"  [ModelServer] Computed {len(log_probs)} log probs")
-        return log_probs
+            print(f"  [ModelServer] Computed {len(log_probs)} log probs")
+            return log_probs
     
-    def compute_log_probs_single(
-        self, 
-        state: str, 
-        action: str,
-        requires_grad: bool = True
-    ) -> torch.Tensor:
-        """
-        Compute log probability for a single state-action pair.
-        Used for gradient accumulation to save memory.
-        """
-        full_text = state + action
+        def compute_log_probs_single(
+            self, 
+            state: str, 
+            action: str,
+            requires_grad: bool = True
+        ) -> torch.Tensor:
+            """
+            Compute log probability for a single state-action pair.
+            Used for gradient accumulation to save memory.
+            """
+            full_text = state + action
         
-        inputs = self.tokenizer(
+            inputs = self.tokenizer(
             full_text, 
             return_tensors="pt", 
             truncation=True, 
             max_length=2048
-        ).to("cuda")
+            ).to("cuda")
         
-        outputs = self.model(**inputs)
-        log_probs_tensor = torch.log_softmax(outputs.logits, dim=-1)
-        mean_log_prob = log_probs_tensor.mean()
+            outputs = self.model(**inputs)
+            log_probs_tensor = torch.log_softmax(outputs.logits, dim=-1)
+            mean_log_prob = log_probs_tensor.mean()
         
-        return mean_log_prob
+            return mean_log_prob
     
-    # ------------------------------------------------------------------------
-    # MODE CONTROL
-    # ------------------------------------------------------------------------
+        # ------------------------------------------------------------------------
+        # MODE CONTROL
+        # ------------------------------------------------------------------------
     
-    def set_train_mode(self):
-        """Set models to training mode."""
-        print(f"  [ModelServer] Setting models to TRAIN mode")
-        # Note: vLLM doesn't have train mode, this is for future HF integration
-        pass
+        def set_train_mode(self):
+            """Set models to training mode."""
+            print(f"  [ModelServer] Setting models to TRAIN mode")
+            # Note: vLLM doesn't have train mode, this is for future HF integration
+            pass
     
-    def set_eval_mode(self):
-        """Set models to eval mode."""
-        print(f"  [ModelServer] Setting models to EVAL mode")
-        # Note: vLLM is always in eval mode for inference
-        pass
+        def set_eval_mode(self):
+            """Set models to eval mode."""
+            print(f"  [ModelServer] Setting models to EVAL mode")
+            # Note: vLLM is always in eval mode for inference
+            pass
     
-    # ------------------------------------------------------------------------
-    # TRAINING UPDATE (PPO)
-    # ------------------------------------------------------------------------
+        # ------------------------------------------------------------------------
+        # TRAINING UPDATE (PPO)
+        # ------------------------------------------------------------------------
     
-    def update_policy_value(
-        self,
-        states: List[str],
-        actions: List[str],
-        old_log_probs: torch.Tensor,
-        advantages: torch.Tensor,
-        returns: torch.Tensor,
-        ppo_config: PPOConfig
-    ) -> Dict[str, float]:
-        """
-        PPO update - model learns from rewards in real-time!
-        Uses gradient accumulation to reduce memory usage.
-        """
-        print(f"  [ModelServer] PPO update for {len(states)} trajectories")
+        def update_policy_value(
+            self,
+            states: List[str],
+            actions: List[str],
+            old_log_probs: torch.Tensor,
+            advantages: torch.Tensor,
+            returns: torch.Tensor,
+            ppo_config: PPOConfig
+        ) -> Dict[str, float]:
+            """
+            PPO update - model learns from rewards in real-time!
+            Uses gradient accumulation to reduce memory usage.
+            """
+            print(f"  [ModelServer] PPO update for {len(states)} trajectories")
         
-        self.model.train()
+            self.model.train()
         
-        total_policy_loss = 0.0
-        total_kl = 0.0
-        num_updates = 0
+            total_policy_loss = 0.0
+            total_kl = 0.0
+            num_updates = 0
         
-        # Move to device
-        old_log_probs = old_log_probs.to("cuda")
-        advantages = advantages.to("cuda")
+            # Move to device
+            old_log_probs = old_log_probs.to("cuda")
+            advantages = advantages.to("cuda")
         
-        # Gradient accumulation: process 1 sample at a time to save memory
-        accumulation_steps = len(states)
+            # Gradient accumulation: process 1 sample at a time to save memory
+            accumulation_steps = len(states)
         
-        # PPO epochs
-        for epoch in range(ppo_config.num_epochs):
-            self.optimizer.zero_grad()
-            
-            epoch_policy_loss = 0.0
-            epoch_kl = 0.0
-            new_log_probs_list = []
-            
-            # Process each sample individually with gradient accumulation
-            for i, (state, action) in enumerate(zip(states, actions)):
-                # Compute new log prob WITH gradients for this single sample
-                new_log_prob = self.compute_log_probs_single(state, action, requires_grad=True)
-                new_log_probs_list.append(new_log_prob)
+            # PPO epochs
+            for epoch in range(ppo_config.num_epochs):
+                self.optimizer.zero_grad()
                 
-                # PPO loss for this sample
-                ratio = torch.exp(new_log_prob - old_log_probs[i])
-                surr1 = ratio * advantages[i]
-                surr2 = torch.clamp(
-                    ratio,
-                    1.0 - ppo_config.clip_epsilon,
-                    1.0 + ppo_config.clip_epsilon
-                ) * advantages[i]
-                sample_loss = -torch.min(surr1, surr2)
+                epoch_policy_loss = 0.0
+                epoch_kl = 0.0
+                new_log_probs_list = []
                 
-                # Scale loss by accumulation steps
-                scaled_loss = sample_loss / accumulation_steps
-                scaled_loss.backward()
+                # Process each sample individually with gradient accumulation
+                for i, (state, action) in enumerate(zip(states, actions)):
+                    # Compute new log prob WITH gradients for this single sample
+                    new_log_prob = self.compute_log_probs_single(state, action, requires_grad=True)
+                    new_log_probs_list.append(new_log_prob)
+                    
+                    # PPO loss for this sample
+                    ratio = torch.exp(new_log_prob - old_log_probs[i])
+                    surr1 = ratio * advantages[i]
+                    surr2 = torch.clamp(
+                        ratio,
+                        1.0 - ppo_config.clip_epsilon,
+                        1.0 + ppo_config.clip_epsilon
+                    ) * advantages[i]
+                    sample_loss = -torch.min(surr1, surr2)
+                    
+                    # Scale loss by accumulation steps
+                    scaled_loss = sample_loss / accumulation_steps
+                    scaled_loss.backward()
+                    
+                    epoch_policy_loss += sample_loss.item()
+                    
+                    # Clear cache periodically
+                    if (i + 1) % 4 == 0:
+                        torch.cuda.empty_cache()
                 
-                epoch_policy_loss += sample_loss.item()
+                # Update after accumulating all gradients
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    ppo_config.max_grad_norm
+                )
+                self.optimizer.step()
                 
-                # Clear cache periodically
-                if (i + 1) % 4 == 0:
-                    torch.cuda.empty_cache()
+                # Compute KL divergence
+                new_log_probs = torch.stack(new_log_probs_list)
+                kl_div = (old_log_probs - new_log_probs).mean().item()
+                
+                # Track
+                total_policy_loss += epoch_policy_loss / len(states)
+                total_kl += abs(kl_div)
+                num_updates += 1
+                
+                # Clear cache
+                torch.cuda.empty_cache()
+                
+                # Early stop
+                if abs(kl_div) > ppo_config.target_kl:
+                    print(f"    Early stop at epoch {epoch} (KL={kl_div:.4f})")
+                    break
             
-            # Update after accumulating all gradients
-            torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(),
-                ppo_config.max_grad_norm
-            )
-            self.optimizer.step()
+            print(f"  [ModelServer] ✓ Model updated ({num_updates} epochs)")
             
-            # Compute KL divergence
-            new_log_probs = torch.stack(new_log_probs_list)
-            kl_div = (old_log_probs - new_log_probs).mean().item()
-            
-            # Track
-            total_policy_loss += epoch_policy_loss / len(states)
-            total_kl += abs(kl_div)
-            num_updates += 1
-            
-            # Clear cache
-            torch.cuda.empty_cache()
-            
-            # Early stop
-            if abs(kl_div) > ppo_config.target_kl:
-                print(f"    Early stop at epoch {epoch} (KL={kl_div:.4f})")
-                break
-        
-        print(f"  [ModelServer] ✓ Model updated ({num_updates} epochs)")
-        
-        return {
-            'policy_loss': total_policy_loss / num_updates if num_updates > 0 else 0.0,
-            'value_loss': 0.0,
-            'kl_divergence': total_kl / num_updates if num_updates > 0 else 0.0,
-        }
+            return {
+                'policy_loss': total_policy_loss / num_updates if num_updates > 0 else 0.0,
+                'value_loss': 0.0,
+                'kl_divergence': total_kl / num_updates if num_updates > 0 else 0.0,
+            }
     
-    # ------------------------------------------------------------------------
-    # UTILITIES
-    # ------------------------------------------------------------------------
+        # ------------------------------------------------------------------------
+        # UTILITIES
+        # ------------------------------------------------------------------------
     
-    def get_state_dict(self):
-        """Get state dict for checkpointing."""
-        model = self.model.module if hasattr(self.model, 'module') else self.model
-        return {
+        def get_state_dict(self):
+            """Get state dict for checkpointing."""
+            model = self.model.module if hasattr(self.model, 'module') else self.model
+            return {
             'model': model.state_dict(),
             'optimizer': self.optimizer.state_dict(),
-        }
+            }
     
     def load_state_dict(self, state_dict):
         """Load state dict from checkpoint."""
@@ -617,10 +617,10 @@ class DistributedPPOTrainer:
         print(f"  ✓ Formatted {len(states)} prompts")
         
         # ------------------------------------------------------------------------
-        # PHASE 2: Batched inference on model server (5 GPUs working together!)
+        # PHASE 2: Batched inference on model server (GPUs working together!)
         # ------------------------------------------------------------------------
         print("Phase 2: Batched inference on model server...")
-        print(f"  All {NUM_TENSOR_PARALLEL_GPU} GPUs will work together on this batch!")
+        print(f"  All {self.num_gpus} GPUs will work together on this batch!")
         
         # This single call processes ALL states at once
         actions, log_probs = ray.get(
