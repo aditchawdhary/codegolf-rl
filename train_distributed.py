@@ -40,30 +40,31 @@ from src.evaluation import InferencePipeline, PerformanceEvaluator
 
 
 # ============================================================================
-# SHARED MODEL SERVER (8 GPUs with Tensor Parallelism)
+# SHARED MODEL SERVER (GPUs with Tensor Parallelism)
 # ============================================================================
-NUM_TENSOR_PARALLEL_GPU=4
 
-
-@ray.remote(num_gpus=NUM_TENSOR_PARALLEL_GPU)
-class SharedModelServer:
-    """
-    Shared model server that uses NUM_TENSOR_PARALLEL_GPU GPUs with tensor parallelism.
-    
-    This is the heart of the system. The model is SHARDED across all 5 GPUs,
-    meaning different parts of each layer live on different GPUs.
-    
-    Key principle: Process requests in BATCHES to maximize GPU utilization.
-    Instead of 16 sequential requests, we do 1 batch of 16 states.
-    """
-    
-    def __init__(self, model_config: ModelConfig):
-        """Initialize HuggingFace model with DeepSpeed for distributed training."""
-        print("\n" + "="*70)
-        print("INITIALIZING HF MODEL WITH DEEPSPEED")
-        print("="*70)
-        print(f"Model: {model_config.model_name}")
-        print(f"GPUs: {NUM_TENSOR_PARALLEL_GPU}")
+def create_model_server_class(num_gpus):
+    """Factory function to create SharedModelServer with dynamic GPU count."""
+    @ray.remote(num_gpus=num_gpus)
+    class SharedModelServer:
+        """
+        Shared model server that uses dynamic GPUs with tensor parallelism.
+        
+        This is the heart of the system. The model is SHARDED across all GPUs,
+        meaning different parts of each layer live on different GPUs.
+        
+        Key principle: Process requests in BATCHES to maximize GPU utilization.
+        Instead of 16 sequential requests, we do 1 batch of 16 states.
+        """
+        
+        def __init__(self, model_config: ModelConfig, num_gpus: int):
+            """Initialize HuggingFace model with DeepSpeed for distributed training."""
+            self.num_gpus = num_gpus
+            print("\n" + "="*70)
+            print("INITIALIZING HF MODEL WITH DEEPSPEED")
+            print("="*70)
+            print(f"Model: {model_config.model_name}")
+            print(f"GPUs: {num_gpus}")
         
         # Load tokenizer
         print("\nLoading tokenizer...")
@@ -424,6 +425,8 @@ class SharedModelServer:
         model = self.model.module if hasattr(self.model, 'module') else self.model
         model.load_state_dict(state_dict['model'])
         self.optimizer.load_state_dict(state_dict['optimizer'])
+    
+    return SharedModelServer
 
 
 # ============================================================================
@@ -523,18 +526,20 @@ class DistributedPPOTrainer:
         self,
         model_config: ModelConfig,
         ppo_config: PPOConfig,
-        num_workers: int = 16
+        num_workers: int = 16,
+        num_gpus: int = 8
     ):
         """Initialize distributed trainer."""
         self.model_config = model_config
         self.ppo_config = ppo_config
         self.num_workers = num_workers
+        self.num_gpus = num_gpus
         
         # Initialize Ray if not already
         if not ray.is_initialized():
             print("\nInitializing Ray...")
             ray.init(
-                num_gpus=NUM_TENSOR_PARALLEL_GPU,
+                num_gpus=num_gpus,
                 num_cpus=num_workers + 4,  # +4 for main process
                 dashboard_host="0.0.0.0",
                 dashboard_port=8265
@@ -542,9 +547,10 @@ class DistributedPPOTrainer:
             print(f"✓ Ray initialized")
             print(f"✓ Dashboard available at http://0.0.0.0:8265")
         
-        # Create shared model server (tensor parallelism across 8 GPUs)
+        # Create shared model server (tensor parallelism across GPUs)
         print("\nCreating shared model server...")
-        self.model_server = SharedModelServer.remote(model_config)
+        SharedModelServerClass = create_model_server_class(num_gpus)
+        self.model_server = SharedModelServerClass.remote(model_config, num_gpus)
         
         # Wait for model to load
         print("Waiting for model to load...")
@@ -571,7 +577,7 @@ class DistributedPPOTrainer:
         print(f"\n{'='*70}")
         print("DISTRIBUTED TRAINER READY")
         print(f"{'='*70}")
-        print(f"Model Server: 1 instance using {NUM_TENSOR_PARALLEL_GPU} GPUs (tensor parallel)")
+        print(f"Model Server: 1 instance using {num_gpus} GPUs (tensor parallel)")
         print(f"Workers: {num_workers} CPU instances")
         print(f"Batch size: {ppo_config.batch_size}")
         print(f"{'='*70}\n")
@@ -835,6 +841,12 @@ def parse_args():
         help="HuggingFace model name"
     )
     parser.add_argument(
+        "--num-gpus",
+        type=int,
+        default=8,
+        help="Number of GPUs for tensor parallelism"
+    )
+    parser.add_argument(
         "--num-workers",
         type=int,
         default=16,
@@ -919,7 +931,7 @@ def main():
     print("OPTIMIZED DISTRIBUTED LLM-RL TRAINING")
     print("="*70)
     print(f"Model: {args.model_name}")
-    print(f"Architecture: 1 model server ({NUM_TENSOR_PARALLEL_GPU} GPUs, tensor parallel)")
+    print(f"Architecture: 1 model server ({args.num_gpus} GPUs, tensor parallel)")
     print(f"Workers: {args.num_workers} CPU workers")
     print(f"Batch size: {args.batch_size}")
     print(f"Key optimization: BATCHED INFERENCE")
@@ -972,7 +984,8 @@ def main():
     trainer = DistributedPPOTrainer(
         model_config=model_config,
         ppo_config=ppo_config,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        num_gpus=args.num_gpus
     )
     
     # ------------------------------------------------------------------------
