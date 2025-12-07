@@ -65,89 +65,89 @@ def create_model_server_class(num_gpus):
             print("="*70)
             print(f"Model: {model_config.model_name}")
             print(f"GPUs: {num_gpus}")
+            
+            # Load tokenizer
+            print("\nLoading tokenizer...")
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_config.model_name,
+                trust_remote_code=True
+            )
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+            
+            # Load base model with automatic device mapping
+            print("Loading base model...")
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_config.model_name,
+                device_map="auto",  # Automatically distribute across GPUs
+                torch_dtype=torch.float16,
+                trust_remote_code=True,
+                use_cache=False,  # Disable KV cache for training to save memory
+            )
+            
+            # Enable gradient checkpointing to save memory
+            print("Enabling gradient checkpointing...")
+            self.model.gradient_checkpointing_enable()
+            
+            # Add LoRA for efficient fine-tuning
+            print("Adding LoRA adapters...")
+            lora_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                r=16,
+                lora_alpha=32,
+                lora_dropout=0.05,
+                target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+                bias="none",
+            )
+            self.model = get_peft_model(self.model, lora_config)
+            self.model.print_trainable_parameters()
+            
+            print(f"✓ Model distributed across {torch.cuda.device_count()} GPUs")
+            
+            # Generation config
+            self.generation_config = GenerationConfig(
+                max_new_tokens=512,
+                temperature=0.7,
+                top_p=0.95,
+                do_sample=True,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+            
+            # Optimizer
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                lr=1e-5
+            )
+            
+            # Store config
+            self.model_config = model_config
+            
+            print(f"\n✓ Model ready on {torch.cuda.device_count()} GPU(s)")
+            print(f"✓ Trainable parameters: {self.model.module.num_parameters(only_trainable=True) if hasattr(self.model, 'module') else self.model.num_parameters(only_trainable=True):,}")
+            print("="*70 + "\n")
         
-        # Load tokenizer
-        print("\nLoading tokenizer...")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_config.model_name,
-            trust_remote_code=True
-        )
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        # ------------------------------------------------------------------------
+        # BATCHED INFERENCE METHODS (Key optimization!)
+        # ------------------------------------------------------------------------
         
-        # Load base model with automatic device mapping
-        print("Loading base model...")
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_config.model_name,
-            device_map="auto",  # Automatically distribute across GPUs
-            torch_dtype=torch.float16,
-            trust_remote_code=True,
-            use_cache=False,  # Disable KV cache for training to save memory
-        )
-        
-        # Enable gradient checkpointing to save memory
-        print("Enabling gradient checkpointing...")
-        self.model.gradient_checkpointing_enable()
-        
-        # Add LoRA for efficient fine-tuning
-        print("Adding LoRA adapters...")
-        lora_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            r=16,
-            lora_alpha=32,
-            lora_dropout=0.05,
-            target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
-            bias="none",
-        )
-        self.model = get_peft_model(self.model, lora_config)
-        self.model.print_trainable_parameters()
-        
-        print(f"✓ Model distributed across {torch.cuda.device_count()} GPUs")
-        
-        # Generation config
-        self.generation_config = GenerationConfig(
-            max_new_tokens=512,
-            temperature=0.7,
-            top_p=0.95,
-            do_sample=True,
-            pad_token_id=self.tokenizer.pad_token_id,
-            eos_token_id=self.tokenizer.eos_token_id,
-        )
-        
-        # Optimizer
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=1e-5
-        )
-        
-        # Store config
-        self.model_config = model_config
-        
-        print(f"\n✓ Model ready on {torch.cuda.device_count()} GPU(s)")
-        print(f"✓ Trainable parameters: {self.model.module.num_parameters(only_trainable=True) if hasattr(self.model, 'module') else self.model.num_parameters(only_trainable=True):,}")
-        print("="*70 + "\n")
-    
-    # ------------------------------------------------------------------------
-    # BATCHED INFERENCE METHODS (Key optimization!)
-    # ------------------------------------------------------------------------
-    
-    def generate_batch(
-        self, 
-        states: List[str], 
-        max_new_tokens: int = 512,
-        temperature: float = 0.7
-    ) -> Tuple[List[str], List[torch.Tensor]]:
-        """
-        Generate actions using HuggingFace model.
-        
-        Args:
-            states: List of prompt strings
-            max_new_tokens: Max tokens to generate
-            temperature: Sampling temperature
-        
-        Returns:
-            actions: Generated code strings
-            log_probs: Log probabilities for PPO
+        def generate_batch(
+            self, 
+            states: List[str], 
+            max_new_tokens: int = 512,
+            temperature: float = 0.7
+        ) -> Tuple[List[str], List[torch.Tensor]]:
+            """
+            Generate actions using HuggingFace model.
+            
+            Args:
+                states: List of prompt strings
+                max_new_tokens: Max tokens to generate
+                temperature: Sampling temperature
+            
+            Returns:
+                actions: Generated code strings
+                log_probs: Log probabilities for PPO
         """
         print(f"  [ModelServer] Generating for {len(states)} states")
         
@@ -542,10 +542,10 @@ class DistributedPPOTrainer:
                 num_gpus=num_gpus,
                 num_cpus=num_workers + 4,  # +4 for main process
                 dashboard_host="0.0.0.0",
-                dashboard_port=8265
+                dashboard_port=8266  # Use 8266 if 8265 is occupied
             )
             print(f"✓ Ray initialized")
-            print(f"✓ Dashboard available at http://0.0.0.0:8265")
+            print(f"✓ Dashboard available at http://0.0.0.0:8266")
         
         # Create shared model server (tensor parallelism across GPUs)
         print("\nCreating shared model server...")
