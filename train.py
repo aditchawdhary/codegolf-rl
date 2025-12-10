@@ -11,7 +11,8 @@ from src.training import (
     PPOTrainer,
     PPOConfig,
     RewardCalculator,
-    CodeSandbox
+    CodeSandbox,
+    AugmentedPPOTrainer
 )
 from src.experiments import CheckpointManager, MetricsTracker, EarlyStopping
 from src.evaluation import InferencePipeline, PerformanceEvaluator
@@ -27,7 +28,7 @@ def parse_args():
     parser.add_argument(
         "--model-name", 
         type=str, 
-        default="Qwen/Qwen2.5-Coder-32B-Instruct",
+        default="Qwen/Qwen3-7B-Instruct",
         help="HuggingFace model name"
     )
     parser.add_argument(
@@ -55,7 +56,7 @@ def parse_args():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=4,
+        default=20,
         help="Batch size"
     )
     parser.add_argument(
@@ -124,7 +125,12 @@ def parse_args():
         default=50,
         help="Evaluate every N steps"
     )
-    
+    parser.add_argument(
+        "--num-augmentations",
+        type=int,
+        default=16,
+        help="Number of augmentations per task (16x like ARC paper)"
+    )
     return parser.parse_args()
 
 
@@ -185,8 +191,15 @@ def main():
     reward_calc = RewardCalculator()
     sandbox = CodeSandbox(timeout=5.0)
     
-    trainer = PPOTrainer(policy, value, ppo_config, reward_calc, sandbox)
-    print("✓ PPO trainer initialized")
+    trainer = AugmentedPPOTrainer(
+        policy, 
+        value, 
+        ppo_config, 
+        reward_calc, 
+        sandbox,
+        num_augmentations=args.num_augmentations
+    )
+    print(f"Augmented PPO trainer initialized ({args.num_augmentations}x augmentation)")
     
     # Initialize checkpointing and logging
     ckpt_manager = CheckpointManager(
